@@ -1,6 +1,6 @@
 from scipy.spatial import Voronoi, distance
 from shapely.geometry import Polygon, LineString, Point, MultiPolygon
-from shapely.ops import unary_union
+from shapely.ops import unary_union, nearest_points
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -26,6 +26,7 @@ obstacles = [
 
     # Obstacles
     Polygon([(5, 5), (15, 5), (15, 6), (6, 6), (6, 10), (5, 10)]),  # L wall
+    Polygon([(15, 9), (19, 9), (19, 5), (18, 5), (18, 8), (15, 8)]),  # L wall
     Polygon([(15, 15), (16, 15), (16, 16), (15, 16)]),  # another square wall
     Polygon([(25, 5), (26, 5), (26, 6), (25, 6)]),  # another square wall
     Polygon([(10, 10), (11, 10), (11, 11), (10, 11)]),  # small wall
@@ -71,7 +72,7 @@ cluster_centroids = np.array([np.mean(cluster, axis=0) for cluster in clusters])
 
 # Add boundary points to the centroids to ensure Voronoi region limits
 boundary_points = np.array([
-    [0, 0], [0, 30], [35, 30], [35, 0]
+    [-10, -10], [-10, 40], [45, 40], [45, -10]
 ])
 all_points = np.vstack([cluster_centroids, boundary_points])
 
@@ -79,8 +80,6 @@ all_points = np.vstack([cluster_centroids, boundary_points])
 vor = Voronoi(all_points)
 
 # Define the boundary of the room (boundary walls)
-# Required so that most region within the room would be assigned 
-# a voronoi cluster
 boundary_polygon = Polygon([
     (0, 0), (0, 30), (35, 30), (35, 0), (0, 0)
 ])
@@ -88,29 +87,66 @@ boundary_polygon = Polygon([
 # Combine all obstacles into a single geometry for clipping
 obstacles_union = unary_union(obstacles)
 
-# Visualization of the Voronoi expansion
-plt.figure(figsize=(10, 10))
+# Create an empty list to store the final polygons
+final_polygons = []
+polygon_clusters = []  # To store which cluster each polygon belongs to
 
+# Identify Voronoi regions corresponding to boundary points
+boundary_point_indices = set(range(len(cluster_centroids), len(all_points)))
 
-
-## Plotting of results ##
 # Plot Voronoi tessellation with boundary clipping and obstacle exclusion
-for region_index in vor.regions:
-    if not region_index or -1 in region_index:
+for point_index, region_index in enumerate(vor.point_region):
+    if point_index in boundary_point_indices:
+        continue  # Skip regions associated with boundary points
+
+    region = vor.regions[region_index]
+    if not region or -1 in region:
         continue
     
-    region = [vor.vertices[i] for i in region_index if i != -1]
-    polygon = Polygon(region).intersection(boundary_polygon)  # Intersect with boundary polygon
+    polygon = Polygon([vor.vertices[i] for i in region])
+    polygon = polygon.intersection(boundary_polygon)  # Intersect with boundary polygon
     
     # Subtract obstacles from the Voronoi region
     polygon = polygon.difference(obstacles_union)
-    
-    # Handle MultiPolygon case (If we have a line segment)
+
     if isinstance(polygon, MultiPolygon):
         for poly in polygon.geoms:
-            x, y = poly.exterior.xy
-            plt.fill(x, y, alpha=0.4)
+            final_polygons.append(poly)
+            polygon_clusters.append(point_index)
     elif isinstance(polygon, Polygon):
+        final_polygons.append(polygon)
+        polygon_clusters.append(point_index)
+
+# Merge isolated polygons (those not containing any original points) with the nearest valid cluster
+for i, poly1 in enumerate(final_polygons):
+    if any(poly1.contains(Point(p)) for p in points):
+        continue  # Skip polygons that contain points
+
+    # Find the nearest polygon that does contain points
+    # To remove stray polygons caused by obstacle subtraction
+    min_dist = np.inf
+    closest_poly_idx = None
+    for j, poly2 in enumerate(final_polygons):
+        if i != j and any(poly2.contains(Point(p)) for p in points):
+            dist = poly1.distance(poly2)
+            if dist < min_dist:
+                min_dist = dist
+                closest_poly_idx = j
+
+    if closest_poly_idx is not None:
+        # Merge the polygons
+        final_polygons[closest_poly_idx] = final_polygons[closest_poly_idx].union(poly1)
+        final_polygons[i] = None  # Mark as merged
+
+# Remove merged (now None) polygons
+final_polygons = [p for p in final_polygons if p is not None]
+
+# Visualization of the final Voronoi expansion
+plt.figure(figsize=(10, 10))
+
+# Plot the final polygons
+for polygon in final_polygons:
+    if not polygon.is_empty:
         x, y = polygon.exterior.xy
         plt.fill(x, y, alpha=0.4)
 
